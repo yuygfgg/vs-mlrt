@@ -1,4 +1,4 @@
-__version__ = "3.22.0"
+__version__ = "3.22.4"
 
 __all__ = [
     "Backend", "BackendV2",
@@ -940,6 +940,8 @@ class RIFEModel(enum.IntEnum):
     v4_22_lite = 4221
     v4_23 = 423
     v4_24 = 424
+    v4_25 = 425
+    v4_26 = 426
 
 
 def RIFEMerge(
@@ -994,18 +996,22 @@ def RIFEMerge(
     else:
         overlap_w, overlap_h = overlap
 
-    multiple_frac = 32 / Fraction(scale)
-    if multiple_frac.denominator != 1:
-        raise ValueError(f'{func_name}: (32 / Fraction(scale)) must be an integer')
-    multiple = int(multiple_frac.numerator)
-    scale = float(Fraction(scale))
-
     model_major = int(str(int(model))[0])
     model_minor = int(str(int(model))[1:3])
     lite = "_lite" if len(str(int(model))) >= 4 else ""
 
-    if (4, 21) <= (model_major, model_minor) < (4, 24) and ensemble:
-        raise ValueError(f'{func_name}: ensemble is not supported in RIFE v4.21 ~ v4.23')
+    if (model_major, model_minor) >= (4, 26):
+        tilesize_requirement = 64
+    else:
+        tilesize_requirement = 32
+    multiple_frac = tilesize_requirement / Fraction(scale)
+    if multiple_frac.denominator != 1:
+        raise ValueError(f'{func_name}: ({tilesize_requirement} / Fraction(scale)) must be an integer')
+    multiple = int(multiple_frac.numerator)
+    scale = float(Fraction(scale))
+
+    if model_major == 4 and (model_minor in (21, 22, 23) or model_minor >= 25) and ensemble:
+        raise ValueError(f'{func_name}: ensemble is not supported')
 
     version = f"v{model_major}.{model_minor}{lite}{'_ensemble' if ensemble else ''}"
 
