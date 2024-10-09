@@ -70,7 +70,6 @@ jobs:
       with:
         repository: onnx/onnx
         # follows onnx in https://github.com/microsoft/onnxruntime/tree/main/cmake/external
-        ref: 595228d99e3977ac27cb79d5963adda262af99ad
         fetch-depth: 1
         path: vsort/onnx
 
