@@ -62,7 +62,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: vsort/onnx/install
-        key: ${{ runner.os }}-vsort-onnx-v2
+        key: ${{ runner.os }}-vsort-onnx-v3
 
     - name: Checkout onnx
       if: steps.cache-onnx.outputs.cache-hit != 'true'
