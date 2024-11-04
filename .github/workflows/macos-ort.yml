@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-14
     
     defaults:
       run:
@@ -62,7 +62,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: vsort/onnx/install
-        key: ${{ runner.os }}-vsort-onnx-v3
+        key: ${{ runner.os }}-vsort-onnx-v2
 
     - name: Checkout onnx
       if: steps.cache-onnx.outputs.cache-hit != 'true'
@@ -70,6 +70,7 @@ jobs:
       with:
         repository: onnx/onnx
         # follows onnx in https://github.com/microsoft/onnxruntime/tree/main/cmake/external
+        ref: 595228d99e3977ac27cb79d5963adda262af99ad
         fetch-depth: 1
         path: vsort/onnx
 
@@ -102,7 +103,7 @@ jobs:
 
     - name: Setup ONNX Runtime
       run: |
-        curl -L -o ort.tgz https://github.com/yuygfgg/onnxruntime/releases/download/v1.20.0/build.tar.gz
+        curl -L -o ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-osx-arm64-1.20.0.tgz
         tar -xf ort.tgz
         mv onnxruntime-* onnxruntime
 
@@ -128,6 +129,9 @@ jobs:
       run: |
         mkdir artifact
         cp -v install/lib/*.dylib artifact
+
+    - name: Describe
+      run: git describe --tags --long
 
     - name: Upload
       uses: actions/upload-artifact@v4
