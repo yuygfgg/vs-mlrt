@@ -1,4 +1,4 @@
-__version__ = "3.22.4"
+__version__ = "3.22.8"
 
 __all__ = [
     "Backend", "BackendV2",
@@ -249,6 +249,7 @@ class Backend:
         opt_shapes: typing.Optional[typing.Tuple[int, int]] = None
         fast_math: bool = True
         exhaustive_tune: bool = False
+        num_streams: int = 1
 
         short_path: typing.Optional[bool] = None # True on Windows by default, False otherwise
         custom_env: typing.Dict[str, str] = field(default_factory=lambda: {})
@@ -941,6 +942,8 @@ class RIFEModel(enum.IntEnum):
     v4_23 = 423
     v4_24 = 424
     v4_25 = 425
+    v4_25_lite = 4251
+    v4_25_heavy = 4252
     v4_26 = 426
 
 
@@ -998,12 +1001,23 @@ def RIFEMerge(
 
     model_major = int(str(int(model))[0])
     model_minor = int(str(int(model))[1:3])
-    lite = "_lite" if len(str(int(model))) >= 4 else ""
+    if len(str(int(model))) >= 4:
+        if str(int(model))[-1] == '1':
+            rife_type = "_lite"
+        elif str(int(model))[-1] == '2':
+            rife_type = "_heavy"
+    else:
+        rife_type = ""
 
     if (model_major, model_minor) >= (4, 26):
         tilesize_requirement = 64
+    elif (model_major, model_minor, rife_type) == (4, 25, "_lite"):
+        tilesize_requirement = 128
+    elif (model_major, model_minor, rife_type) == (4, 25, "_heavy"):
+        tilesize_requirement = 64
     else:
         tilesize_requirement = 32
+
     multiple_frac = tilesize_requirement / Fraction(scale)
     if multiple_frac.denominator != 1:
         raise ValueError(f'{func_name}: ({tilesize_requirement} / Fraction(scale)) must be an integer')
@@ -1013,7 +1027,7 @@ def RIFEMerge(
     if model_major == 4 and (model_minor in (21, 22, 23) or model_minor >= 25) and ensemble:
         raise ValueError(f'{func_name}: ensemble is not supported')
 
-    version = f"v{model_major}.{model_minor}{lite}{'_ensemble' if ensemble else ''}"
+    version = f"v{model_major}.{model_minor}{rife_type}{'_ensemble' if ensemble else ''}"
 
     if (model_major, model_minor) >= (4, 7) and scale != 1.0:
         raise ValueError("not supported")
@@ -2636,6 +2650,7 @@ def _inference(
         ret = core.migx.Model(
             clips, mxr_path,
             device_id=backend.device_id,
+            num_streams=backend.num_streams,
             **kwargs
         )
     elif isinstance(backend, Backend.OV_NPU):

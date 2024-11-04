@@ -933,10 +933,6 @@ static void VS_CC vsMIGXCreate(
     if (num_streams <= 0) {
         return set_error("\"num_streams\" must be positive");
     }
-    // TODO
-    if (num_streams != 1) {
-        return set_error("\"num_streams\" must be 1 for now");
-    }
 
     setDimensions(
         d->out_vi,
