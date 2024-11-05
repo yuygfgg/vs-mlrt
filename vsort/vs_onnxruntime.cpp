@@ -21,7 +21,7 @@ using namespace std::chrono_literals;
 
 #include <onnx/common/version.h>
 #include <onnx/onnx_pb.h>
-#define ENABLE_COREML
+
 #define NOMINMAX
 
 #include <onnxruntime_c_api.h>
