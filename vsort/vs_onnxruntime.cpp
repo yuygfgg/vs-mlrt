@@ -21,7 +21,7 @@ using namespace std::chrono_literals;
 
 #include <onnx/common/version.h>
 #include <onnx/onnx_pb.h>
-
+#define ENABLE_COREML
 #define NOMINMAX
 
 #include <onnxruntime_c_api.h>
@@ -1232,10 +1232,12 @@ static void VS_CC vsOrtCreate(
         }
 #endif // ENABLE_CUDA
 #ifdef ENABLE_COREML
+        uint32_t coreml_flag = 0;
+        if (fp16) coreml_flag |= 0x010;
         if (d->backend == Backend::COREML) {
             checkError(OrtSessionOptionsAppendExecutionProvider_CoreML(
                 session_options,
-                0
+                coreml_flag
             ));
         }
 #endif // ENABLE_COREML
