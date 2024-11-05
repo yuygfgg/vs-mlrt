@@ -1416,7 +1416,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
         "provider:data:opt;" // "": Default (CPU), "CUDA": CUDA, "COREML": COREML, "DML": DML
         "device_id:int:opt;"
 #ifdef ENABLE_COREML
-        "MLprogram:int:opt"
+        "MLprogram:int:opt;"
 #endif //ENABLE_COREML
         "num_streams:int:opt;"
         "verbosity:int:opt;"
