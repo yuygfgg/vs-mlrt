@@ -6,12 +6,17 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <NvInferRuntime.h>
 
 #include <VapourSynth.h>
 #include <VSHelper.h>
+
+#ifdef __cpp_impl_reflection
+#include <meta>
+#endif
 
 static inline
 void setDimensions(
@@ -24,15 +29,15 @@ void setDimensions(
     bool flexible_output
 ) noexcept {
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     auto input_name = exec_context->getEngine().getIOTensorName(0);
     auto output_name = exec_context->getEngine().getIOTensorName(1);
     const nvinfer1::Dims & in_dims = exec_context->getTensorShape(input_name);
     const nvinfer1::Dims & out_dims = exec_context->getTensorShape(output_name);
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     const nvinfer1::Dims & in_dims = exec_context->getBindingDimensions(0);
     const nvinfer1::Dims & out_dims = exec_context->getBindingDimensions(1);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
     auto in_height = static_cast<int>(in_dims.d[2]);
     auto in_width = static_cast<int>(in_dims.d[3]);
@@ -150,12 +155,12 @@ std::optional<std::string> checkNodesAndContext(
     const std::vector<const VSVideoInfo *> & vis
 ) noexcept {
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     auto input_name = execution_context->getEngine().getIOTensorName(0);
     const nvinfer1::Dims & network_in_dims = execution_context->getTensorShape(input_name);
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     const nvinfer1::Dims & network_in_dims = execution_context->getBindingDimensions(0);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
     auto network_in_channels = network_in_dims.d[1];
     int num_planes = numPlanes(vis);
@@ -192,14 +197,18 @@ static inline void VS_CC getDeviceProp(
         return ;
     }
 
-    auto setProp = [&](const char * name, auto value, int data_length = -1) {
+    auto setProp = [&](const char * name, const auto & value, int data_length = -1) {
         using T = std::decay_t<decltype(value)>;
-        if constexpr (std::is_same_v<T, int>) {
-            vsapi->propSetInt(out, name, value, paReplace);
-        } else if constexpr (std::is_same_v<T, size_t>) {
+        if constexpr (std::is_integral_v<T>) {
             vsapi->propSetInt(out, name, static_cast<int64_t>(value), paReplace);
-        } else if constexpr (std::is_same_v<T, char *>) {
+        } else if constexpr (std::is_same_v<T, const char *>) {
             vsapi->propSetData(out, name, value, data_length, paReplace);
+        } else if constexpr (std::is_integral_v<std::remove_pointer_t<T>>) {
+            std::array<int64_t, std::extent_v<std::remove_reference_t<decltype(value)>>> data;
+            for (int i = 0; i < static_cast<int>(std::size(data)); i++) {
+                data[i] = value[i];
+            }
+            vsapi->propSetIntArray(out, name, std::data(data), static_cast<int>(std::size(data)));
         }
     };
 
@@ -207,6 +216,22 @@ static inline void VS_CC getDeviceProp(
     cudaDriverGetVersion(&driver_version);
     setProp("driver_version", driver_version);
 
+#ifdef __cpp_impl_reflection
+    constexpr auto ctx = std::meta::access_context::current();
+    template for (
+        constexpr auto r : define_static_array(nonstatic_data_members_of(^^decltype(prop), ctx))
+    ) {
+        if constexpr (identifier_of(r) == "uuid") {
+            std::array<int64_t, 16> uuid;
+            for (int i = 0; i < 16; ++i) {
+                uuid[i] = prop.uuid.bytes[i];
+            }
+            vsapi->propSetIntArray(out, "uuid", std::data(uuid), static_cast<int>(std::size(uuid)));
+        } else if constexpr (identifier_of(r) != "reserved") {
+            setProp(std::string(identifier_of(r)).c_str(), prop.[:r:]);
+        }
+    }
+#else // __cpp_impl_reflection
     setProp("name", prop.name);
     {
         std::array<int64_t, 16> uuid;
@@ -221,18 +246,14 @@ static inline void VS_CC getDeviceProp(
     setProp("warp_size", prop.warpSize);
     setProp("mem_pitch", prop.memPitch);
     setProp("max_threads_per_block", prop.maxThreadsPerBlock);
-    setProp("clock_rate", prop.clockRate);
     setProp("total_const_mem", prop.totalConstMem);
     setProp("major", prop.major);
     setProp("minor", prop.minor);
     setProp("texture_alignment", prop.textureAlignment);
     setProp("texture_pitch_alignment", prop.texturePitchAlignment);
-    setProp("device_overlap", prop.deviceOverlap);
     setProp("multi_processor_count", prop.multiProcessorCount);
-    setProp("kernel_exec_timeout_enabled", prop.kernelExecTimeoutEnabled);
     setProp("integrated", prop.integrated);
     setProp("can_map_host_memory", prop.canMapHostMemory);
-    setProp("compute_mode", prop.computeMode);
     setProp("concurrent_kernels", prop.concurrentKernels);
     setProp("ecc_enabled", prop.ECCEnabled);
     setProp("pci_bus_id", prop.pciBusID);
@@ -241,7 +262,6 @@ static inline void VS_CC getDeviceProp(
     setProp("tcc_driver", prop.tccDriver);
     setProp("async_engine_count", prop.asyncEngineCount);
     setProp("unified_addressing", prop.unifiedAddressing);
-    setProp("memory_clock_rate", prop.memoryClockRate);
     setProp("memory_bus_width", prop.memoryBusWidth);
     setProp("l2_cache_size", prop.l2CacheSize);
     setProp("persisting_l2_cache_max_size", prop.persistingL2CacheMaxSize);
@@ -255,7 +275,6 @@ static inline void VS_CC getDeviceProp(
     setProp("is_multi_gpu_board", prop.isMultiGpuBoard);
     setProp("multi_gpu_board_group_id", prop.multiGpuBoardGroupID);
     setProp("host_native_atomic_supported", prop.hostNativeAtomicSupported);
-    setProp("single_to_double_precision_perf_ratio", prop.singleToDoublePrecisionPerfRatio);
     setProp("pageable_memory_access", prop.pageableMemoryAccess);
     setProp("conccurrent_managed_access", prop.concurrentManagedAccess);
     setProp("compute_preemption_supported", prop.computePreemptionSupported);
@@ -264,7 +283,6 @@ static inline void VS_CC getDeviceProp(
         prop.canUseHostPointerForRegisteredMem
     );
     setProp("cooperative_launch", prop.cooperativeLaunch);
-    setProp("cooperative_multi_device_launch", prop.cooperativeMultiDeviceLaunch);
     setProp("shared_mem_per_block_optin", prop.sharedMemPerBlockOptin);
     setProp(
         "pageable_memory_access_uses_host_page_tables",
@@ -274,6 +292,7 @@ static inline void VS_CC getDeviceProp(
     setProp("max_blocks_per_multi_processor", prop.maxBlocksPerMultiProcessor);
     setProp("access_policy_max_window_size", prop.accessPolicyMaxWindowSize);
     setProp("reserved_shared_mem_per_block", prop.reservedSharedMemPerBlock);
+#endif // __cpp_impl_reflection
 };
 
 #endif // VSTRT_UTILS_H_

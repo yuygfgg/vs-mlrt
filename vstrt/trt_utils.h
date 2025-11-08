@@ -35,7 +35,7 @@ struct InferenceInstance {
     std::unique_ptr<nvinfer1::IExecutionContext> exec_context;
     GraphExecResource graphexec;
 
-#if NV_TENSORRT_MAJOR >= 10
+#if NV_TENSORRT_MAJOR >= 10 || defined(TRT_MAJOR_RTX)
     Resource<uint8_t *, cudaFree> d_context_allocation;
 #endif
 };
@@ -74,21 +74,21 @@ std::optional<int> selectProfile(
         tile_h = std::get<VideoSize>(tile_size).height;
     }
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     auto input_name = engine->getIOTensorName(0);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
     // finds the optimal profile
     for (int i = 0; i < engine->getNbOptimizationProfiles(); ++i) {
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         nvinfer1::Dims opt_dims = engine->getProfileShape(
             input_name, i, nvinfer1::OptProfileSelector::kOPT
         );
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         nvinfer1::Dims opt_dims = engine->getProfileDimensions(
             0, i, nvinfer1::OptProfileSelector::kOPT
         );
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
         if (opt_dims.d[0] != batch_size) {
             continue;
@@ -100,15 +100,15 @@ std::optional<int> selectProfile(
 
     // finds the first eligible profile
     for (int i = 0; i < engine->getNbOptimizationProfiles(); ++i) {
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         nvinfer1::Dims min_dims = engine->getProfileShape(
             input_name, i, nvinfer1::OptProfileSelector::kMIN
         );
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         nvinfer1::Dims min_dims = engine->getProfileDimensions(
             0, i, nvinfer1::OptProfileSelector::kMIN
         );
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
         if (min_dims.d[0] > batch_size) {
             continue;
@@ -117,15 +117,15 @@ std::optional<int> selectProfile(
             continue;
         }
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         nvinfer1::Dims max_dims = engine->getProfileShape(
             input_name, i, nvinfer1::OptProfileSelector::kMAX
         );
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         nvinfer1::Dims max_dims = engine->getProfileDimensions(
             0, i, nvinfer1::OptProfileSelector::kMAX
         );
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
         if (max_dims.d[0] < batch_size) {
             continue;
@@ -158,7 +158,7 @@ std::optional<ErrorMessage> enqueue(
         cudaMemcpyHostToDevice, stream
     ));
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     auto input_name = exec_context->getEngine().getIOTensorName(0);
     auto output_name = exec_context->getEngine().getIOTensorName(1);
 
@@ -171,7 +171,7 @@ std::optional<ErrorMessage> enqueue(
     if (!exec_context->enqueueV3(stream)) {
         return set_error("enqueue error");
     }
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     void * bindings[] {
         static_cast<void *>(src.d_data.data),
         static_cast<void *>(dst.d_data.data)
@@ -180,7 +180,7 @@ std::optional<ErrorMessage> enqueue(
     if (!exec_context->enqueueV2(bindings, stream, nullptr)) {
         return set_error("enqueue error");
     }
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
     checkError(cudaMemcpyAsync(
         dst.h_data, dst.d_data, dst.size,
@@ -254,16 +254,16 @@ int getBytesPerSample(nvinfer1::DataType type) noexcept {
             return 1;
         case nvinfer1::DataType::kUINT8:
             return 1;
-#if (NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 861
+#if (NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 8061 || defined(TRT_MAJOR_RTX)
         case nvinfer1::DataType::kFP8:
             return 1;
-#endif // (NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 861
-#if NV_TENSORRT_MAJOR >= 9
+#endif // (NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 8061 || defined(TRT_MAJOR_RTX)
+#if NV_TENSORRT_MAJOR >= 9 || defined(TRT_MAJOR_RTX)
         case nvinfer1::DataType::kBF16:
             return 2;
         case nvinfer1::DataType::kINT64:
             return 8;
-#endif // NV_TENSORRT_MAJOR >= 9
+#endif // NV_TENSORRT_MAJOR >= 9 || defined(TRT_MAJOR_RTX)
         default:
             return 0;
     }
@@ -275,7 +275,11 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
     const std::optional<int> & profile_index,
     const TileSize & tile_size,
     bool use_cuda_graph,
+#if NV_TENSORRT_MAJOR < 10 && !defined(TRT_MAJOR_RTX)
     bool & is_dynamic
+#else // NV_TENSORRT_MAJOR < 10 && !defined(TRT_MAJOR_RTX)
+    bool is_dynamic
+#endif // NV_TENSORRT_MAJOR < 10 && !defined(TRT_MAJOR_RTX)
 ) noexcept {
 
     const auto set_error = [](const ErrorMessage & error_message) {
@@ -286,33 +290,37 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
     checkError(cudaStreamCreateWithFlags(&stream.data, cudaStreamNonBlocking));
 
     auto exec_context = std::unique_ptr<nvinfer1::IExecutionContext>(
-#if NV_TENSORRT_MAJOR >= 10
-        engine->createExecutionContext(nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED)
+#if NV_TENSORRT_MAJOR >= 10 || defined(TRT_MAJOR_RTX)
+        engine->createExecutionContext(
+            is_dynamic ?
+            nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED :
+            nvinfer1::ExecutionContextAllocationStrategy::kON_PROFILE_CHANGE
+        )
 #else
         engine->createExecutionContext()
 #endif
     );
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
-    auto input_name = exec_context->getEngine().getIOTensorName(0);
-    auto output_name = exec_context->getEngine().getIOTensorName(1);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
+    auto input_name = engine->getIOTensorName(0);
+    auto output_name = engine->getIOTensorName(1);
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
     if (!exec_context->allInputDimensionsSpecified()) {
         if (!profile_index.has_value()) {
             return set_error("no valid optimization profile found");
         }
-
+#if NV_TENSORRT_MAJOR < 10 && !defined(TRT_MAJOR_RTX)
         is_dynamic = true;
-
+#endif // NV_TENSORRT_MAJOR < 10 && !defined(TRT_MAJOR_RTX)
         exec_context->setOptimizationProfileAsync(profile_index.value(), stream);
         checkError(cudaStreamSynchronize(stream));
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         nvinfer1::Dims dims = exec_context->getTensorShape(input_name);
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         nvinfer1::Dims dims = exec_context->getBindingDimensions(0);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
         dims.d[0] = 1;
 
@@ -323,19 +331,21 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
             dims.d[2] = std::get<VideoSize>(tile_size).height;
             dims.d[3] = std::get<VideoSize>(tile_size).width;
         }
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         exec_context->setInputShape(input_name, dims);
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         exec_context->setBindingDimensions(0, dims);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     } else if (std::holds_alternative<RequestedTileSize>(tile_size)) {
+#if NV_TENSORRT_MAJOR < 10 && !defined(TRT_MAJOR_RTX)
         is_dynamic = false;
+#endif // NV_TENSORRT_MAJOR < 10 && !defined(TRT_MAJOR_RTX)
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         nvinfer1::Dims dims = exec_context->getTensorShape(input_name);
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         nvinfer1::Dims dims = exec_context->getBindingDimensions(0);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
         if (std::holds_alternative<RequestedTileSize>(tile_size)) {
             if (dims.d[2] != std::get<RequestedTileSize>(tile_size).tile_h ||
@@ -354,13 +364,13 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
 
     MemoryResource src {};
     {
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         auto dim = exec_context->getTensorShape(input_name);
         auto type = engine->getTensorDataType(input_name);
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         auto dim = exec_context->getBindingDimensions(0);
         auto type = engine->getBindingDataType(0);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
         auto size = getSize(dim) * getBytesPerSample(type);
 
@@ -379,13 +389,13 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
 
     MemoryResource dst {};
     {
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         auto dim = exec_context->getTensorShape(output_name);
         auto type = engine->getTensorDataType(output_name);
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         auto dim = exec_context->getBindingDimensions(1);
         auto type = engine->getBindingDataType(1);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
         auto size = getSize(dim) * getBytesPerSample(type);
 
@@ -402,20 +412,23 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
         };
     }
 
-#if NV_TENSORRT_MAJOR >= 10
-    size_t buffer_size { exec_context->updateDeviceMemorySizeForShapes() };
-    if (buffer_size == 0) {
-        return set_error("failed to get internal activation buffer size");
-    }
-
+#if NV_TENSORRT_MAJOR >= 10 || defined(TRT_MAJOR_RTX)
     Resource<uint8_t *, cudaFree> d_context_allocation {};
-    checkError(cudaMalloc(&d_context_allocation.data, buffer_size));
+
+    if (is_dynamic) {
+        size_t buffer_size { exec_context->updateDeviceMemorySizeForShapes() };
+        if (buffer_size == 0) {
+            return set_error("failed to get internal activation buffer size");
+        }
+
+        checkError(cudaMalloc(&d_context_allocation.data, buffer_size));
 
 #if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 1001
-    exec_context->setDeviceMemoryV2(d_context_allocation.data, static_cast<int64_t>(buffer_size));
+        exec_context->setDeviceMemoryV2(d_context_allocation.data, static_cast<int64_t>(buffer_size));
 #else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 1001
-    exec_context->setDeviceMemory(d_context_allocation.data);
+        exec_context->setDeviceMemory(d_context_allocation.data);
 #endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 1001
+    }
 #endif // NV_TENSORRT_MAJOR >= 10
 
     GraphExecResource graphexec {};
@@ -437,7 +450,7 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
         .stream = std::move(stream),
         .exec_context = std::move(exec_context),
         .graphexec = std::move(graphexec),
-#if NV_TENSORRT_MAJOR >= 10
+#if NV_TENSORRT_MAJOR >= 10 || defined(TRT_MAJOR_RTX)
         .d_context_allocation = std::move(d_context_allocation)
 #endif
     };
@@ -449,36 +462,36 @@ std::optional<ErrorMessage> checkEngine(
     bool flexible_output
 ) noexcept {
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     int num_bindings = engine->getNbIOTensors();
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     int num_bindings = engine->getNbBindings();
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
     if (num_bindings != 2) {
         return "network binding count must be 2, got " + std::to_string(num_bindings);
     }
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     auto input_name = engine->getIOTensorName(0);
     auto output_name = engine->getIOTensorName(1);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     if (engine->getTensorIOMode(input_name) != nvinfer1::TensorIOMode::kINPUT) {
         return "the first binding should be an input binding";
     }
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     if (!engine->bindingIsInput(0)) {
         return "the first binding should be an input binding";
     }
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     const nvinfer1::Dims & input_dims = engine->getTensorShape(input_name);
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     const nvinfer1::Dims & input_dims = engine->getBindingDimensions(0);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
     if (input_dims.nbDims != 4) {
         return "expects network with 4-D input";
@@ -487,21 +500,21 @@ std::optional<ErrorMessage> checkEngine(
         return "batch size of network input must be 1";
     }
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     if (engine->getTensorIOMode(output_name) != nvinfer1::TensorIOMode::kOUTPUT) {
         return "the second binding should be an output binding";
     }
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     if (engine->bindingIsInput(1)) {
         return "the second binding should be an output binding";
     }
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     const nvinfer1::Dims & output_dims = engine->getTensorShape(output_name);
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     const nvinfer1::Dims & output_dims = engine->getBindingDimensions(1);
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
     if (output_dims.nbDims != 4) {
         return "expects network with 4-D output";
@@ -523,27 +536,27 @@ std::optional<ErrorMessage> checkEngine(
         return "output dimensions must be divisible by input dimensions";
     }
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     for (const auto & name : { input_name, output_name }) {
         if (engine->getTensorLocation(name) != nvinfer1::TensorLocation::kDEVICE) {
             return "network binding " + std::string{ name } + " should reside on device";
         }
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     for (int i = 0; i < 2; i++) {
         if (engine->getLocation(i) != nvinfer1::TensorLocation::kDEVICE) {
             return "network binding " + std::to_string(i) + " should reside on device";
         }
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
 
-#if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#if NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         if (engine->getTensorFormat(name) != nvinfer1::TensorFormat::kLINEAR) {
             return "expects network IO with layout NCHW (row major linear)";
         }
-#else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#else // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
         if (engine->getBindingFormat(i) != nvinfer1::TensorFormat::kLINEAR) {
             return "expects network IO with layout NCHW (row major linear)";
         }
-#endif // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
+#endif // NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR >= 805 || defined(TRT_MAJOR_RTX)
     }
 
     return {};
@@ -581,20 +594,20 @@ int getSampleType(nvinfer1::DataType type) noexcept {
     switch (type) {
         case nvinfer1::DataType::kFLOAT:
         case nvinfer1::DataType::kHALF:
-#if (NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 861
+#if (NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 8061 || defined(TRT_MAJOR_RTX)
         case nvinfer1::DataType::kFP8:
-#endif // (NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 861
-#if NV_TENSORRT_MAJOR >= 9
+#endif // (NV_TENSORRT_MAJOR * 100 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 8061 || defined(TRT_MAJOR_RTX)
+#if NV_TENSORRT_MAJOR >= 9 || defined(TRT_MAJOR_RTX)
         case nvinfer1::DataType::kBF16:
-#endif // NV_TENSORRT_MAJOR >= 9
+#endif // NV_TENSORRT_MAJOR >= 9 || defined(TRT_MAJOR_RTX)
             return 1;
         case nvinfer1::DataType::kINT8:
         case nvinfer1::DataType::kINT32:
         case nvinfer1::DataType::kBOOL:
         case nvinfer1::DataType::kUINT8:
-#if NV_TENSORRT_MAJOR >= 9
+#if NV_TENSORRT_MAJOR >= 9 || defined(TRT_MAJOR_RTX)
         case nvinfer1::DataType::kINT64:
-#endif // NV_TENSORRT_MAJOR >= 9
+#endif // NV_TENSORRT_MAJOR >= 9 || defined(TRT_MAJOR_RTX)
             return 0;
         default:
             return -1;

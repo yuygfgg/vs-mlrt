@@ -3,9 +3,11 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -38,8 +40,12 @@ static std::optional<std::string> checkNodes(
 ) noexcept {
 
     for (const auto & vi : vis) {
-        if (vi->format->sampleType != stFloat || vi->format->bitsPerSample != 32) {
-            return "expects clip with type fp32";
+        if (vi->format->sampleType != stFloat) {
+            return "expects clip with floating-point type";
+        }
+        
+        if (vi->format->bitsPerSample != 32 && vi->format->bitsPerSample != 16) {
+            return "expects clip with type fp32 or fp16";
         }
 
         if (vi->width != vis[0]->width || vi->height != vis[0]->height) {
@@ -111,6 +117,7 @@ struct vsNcnnData {
     int out_tile_c, out_tile_w, out_tile_h;
 
     bool fp16;
+    bool fp16_output;
 
     std::vector<Resource> resources;
     std::vector<int> tickets;
@@ -180,6 +187,8 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
         for (const auto & node : d->nodes) {
             in_vis.emplace_back(vsapi->getVideoInfo(node));
         }
+
+        const auto fp16_input = in_vis[0]->format->bitsPerSample == 16;
 
         std::vector<const VSFrameRef *> src_frames;
         src_frames.reserve(std::size(d->nodes));
@@ -285,7 +294,11 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
                 int x_crop_end = (x == src_width - src_tile_w) ? 0 : d->overlap_w;
 
                 {
-                    auto input_buffer = reinterpret_cast<uint8_t *>(d->fp16 ? resource.h_src_fp32.data : resource.h_src.data);
+                    auto input_buffer = reinterpret_cast<uint8_t *>(
+                        d->fp16 && !fp16_input ?
+                        resource.h_src_fp32.data :
+                        resource.h_src.data
+                    );
 
                     // assumes the pitches of ncnn::Mat to be
                     // (cstep * elemsize, w * h * elemsize, h * elemsize)
@@ -300,12 +313,12 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
                                 src_ptr, src_stride,
                                 src_tile_w_bytes, src_tile_h
                             );
-                            input_buffer += resource.h_src.cstep * sizeof(float);
+                            input_buffer += resource.h_src.cstep * in_vis[0]->format->bytesPerSample;
                         }
                     }
                 }
 
-                if (d->fp16) {
+                if (d->fp16 && !fp16_input) {
                     ncnn::cast_float32_to_float16(resource.h_src_fp32, resource.h_src);
                 }
 
@@ -329,12 +342,16 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
                     return set_error("cmd reset failed");
                 }
 
-                if (d->fp16) {
+                if (d->fp16 && !d->fp16_output) {
                     ncnn::cast_float16_to_float32(resource.h_dst, resource.h_dst_fp32);
                 }
 
                 {
-                    auto output_buffer = reinterpret_cast<uint8_t *>(d->fp16 ? resource.h_dst_fp32.data : resource.h_dst.data);
+                    auto output_buffer = reinterpret_cast<uint8_t *>(
+                        d->fp16 && !d->fp16_output ?
+                        resource.h_dst_fp32.data :
+                        resource.h_dst.data
+                    );
 
                     for (int plane = 0; plane < dst_planes; ++plane) {
                         auto dst_ptr = (dst_ptrs[plane] +
@@ -351,7 +368,7 @@ static const VSFrameRef *VS_CC vsNcnnGetFrame(
                                 dst_tile_h - (y_crop_start + y_crop_end)
                             );
 
-                            output_buffer += resource.h_dst.cstep * sizeof(float);
+                            output_buffer += resource.h_dst.cstep * d->out_vi->format->bytesPerSample;
                         }
                     }
                 }
@@ -516,6 +533,9 @@ static void VS_CC vsNcnnCreate(
     if (error) {
         d->fp16 = false;
     }
+    if (!d->fp16 && in_vis[0]->format->bitsPerSample != 32) {
+        return set_error("expects clip with type fp32");
+    }
 
     auto flexible_output_prop = vsapi->propGetData(in, "flexible_output_prop", 0, &error);
     if (!error) {
@@ -526,6 +546,17 @@ static void VS_CC vsNcnnCreate(
     if (error) {
         path_is_serialization = false;
     }
+
+    int output_format = int64ToIntS(vsapi->propGetInt(in, "output_format", 0, &error));
+    if (error) {
+        output_format = 0;
+    }
+    if (output_format != 0 && output_format != 1) {
+        return set_error("\"output_format\" must be 0 or 1");
+    } else if (output_format != 0 && !d->fp16) {
+        return set_error("\"output_format\" must be 0");
+    }
+    d->fp16_output = output_format == 1;
 
     std::string_view path_view;
     std::string path;
@@ -570,9 +601,9 @@ static void VS_CC vsNcnnCreate(
     d->out_vi->width *= d->out_tile_w / d->in_tile_w;
     d->out_vi->height *= d->out_tile_h / d->in_tile_h;
     if (d->out_tile_c == 1 || !d->flexible_output_prop.empty()) {
-        d->out_vi->format = vsapi->registerFormat(cmGray, stFloat, 32, 0, 0, core);
+        d->out_vi->format = vsapi->registerFormat(cmGray, stFloat, output_format == 0 ? 32 : 16, 0, 0, core);
     } else if (d->out_tile_c == 3) {
-        d->out_vi->format = vsapi->registerFormat(cmRGB, stFloat, 32, 0, 0, core);
+        d->out_vi->format = vsapi->registerFormat(cmRGB, stFloat, output_format == 0 ? 32 : 16, 0, 0, core);
     } else {
         return set_error("output dimensions must be 1 or 3, or enable \"flexible_output\"");
     }
@@ -627,8 +658,12 @@ static void VS_CC vsNcnnCreate(
         resource.d_dst.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, bps, resource.blob_vkallocator);
         resource.h_dst.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, bps);
         if (d->fp16) {
-            resource.h_src_fp32.create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float));
-            resource.h_dst_fp32.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float));
+            if (in_vis[0]->format->bitsPerSample == 32) {
+                resource.h_src_fp32.create(d->in_tile_w, d->in_tile_h, d->in_tile_c, sizeof(float));
+            }
+            if (d->out_vi->format->bitsPerSample == 32) {
+                resource.h_dst_fp32.create(d->out_tile_w, d->out_tile_h, d->out_tile_c, sizeof(float));
+            }
         }
     }
 
@@ -642,6 +677,104 @@ static void VS_CC vsNcnnCreate(
         fmParallel, 0, d.release(), core
     );
 }
+
+
+static inline void VS_CC getDeviceProp(
+    const VSMap *in, VSMap *out, void *userData,
+    VSCore *core, const VSAPI *vsapi
+) {
+
+    int err;
+    int device_id = int64ToIntS(vsapi->propGetInt(in, "device_id", 0, &err));
+    if (err) {
+        device_id = 0;
+    }
+
+    ncnn::VulkanDevice * device = ncnn::get_gpu_device(device_id);
+    if (device == nullptr) {
+        vsapi->setError(out, "get_gpu_device failed");
+        return ;
+    }
+    const auto & info = device->info;
+
+    auto setProp = [&](const char * name, auto value, int data_length = -1) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_integral_v<T>) {
+            vsapi->propSetInt(out, name, static_cast<int64_t>(value), paReplace);
+        } else if constexpr (std::is_floating_point_v<T>) {
+            vsapi->propSetFloat(out, name, value, paReplace);
+        } else if constexpr (std::is_same_v<T, const char *>) {
+            vsapi->propSetData(out, name, value, data_length, paReplace);
+        }
+    };
+
+    setProp("api_version", info.api_version());
+    setProp("driver_version", info.driver_version());
+    setProp("vendor_id", info.vendor_id());
+    setProp("device_id", info.device_id());
+    setProp("device_name", info.device_name());
+    setProp("type", info.type());
+    setProp("max_shared_memory_size", info.max_shared_memory_size());
+    setProp("max_workgroup_count_x", info.max_workgroup_count_x());
+    setProp("max_workgroup_count_y", info.max_workgroup_count_y());
+    setProp("max_workgroup_count_z", info.max_workgroup_count_z());
+    setProp("max_workgroup_invocations", info.max_workgroup_invocations());
+    setProp("max_workgroup_size_x", info.max_workgroup_size_x());
+    setProp("max_workgroup_size_y", info.max_workgroup_size_y());
+    setProp("max_workgroup_size_z", info.max_workgroup_size_z());
+    setProp("memory_map_alignment", info.memory_map_alignment());
+    setProp("buffer_offset_alignment", info.buffer_offset_alignment());
+    setProp("non_coherent_atom_size", info.non_coherent_atom_size());
+    setProp("buffer_image_granularity", info.buffer_image_granularity());
+    setProp("max_imge_dimension_1d", info.max_image_dimension_1d());
+    setProp("max_imge_dimension_2d", info.max_image_dimension_2d());
+    setProp("max_imge_dimension_3d", info.max_image_dimension_3d());
+    setProp("timestamp_period", info.timestamp_period());
+    setProp("compute_queue_family_index", info.compute_queue_family_index());
+    // setProp("graphics_queue_family_index", info.graphics_queue_family_index());
+    setProp("transfer_queue_family_index", info.transfer_queue_family_index());
+    setProp("unified_compute_transfer_queue", info.unified_compute_transfer_queue());
+    setProp("subgroup_size", info.subgroup_size());
+    // setProp("support_subgroup_basic", info.support_subgroup_basic());
+    // setProp("support_subgroup_vote", info.support_subgroup_vote());
+    // setProp("support_subgroup_ballot", info.support_subgroup_ballot());
+    // setProp("support_subgroup_shuffle", info.support_subgroup_shuffle());
+    setProp("bug_storage_buffer_no_l1", info.bug_storage_buffer_no_l1());
+    setProp("bug_corrupted_online_pipeline_cache", info.bug_corrupted_online_pipeline_cache());
+    setProp("bug_buffer_image_load_zero", info.bug_buffer_image_load_zero());
+    setProp("bug_implicit_fp16_arithmetic", info.bug_implicit_fp16_arithmetic());
+    setProp("support_fp16_packed", info.support_fp16_packed());
+    setProp("support_fp16_storage", info.support_fp16_storage());
+    setProp("support_fp16_arithmetic", info.support_fp16_arithmetic());
+    setProp("support_int8_packed", info.support_int8_packed());
+    setProp("support_int8_storage", info.support_int8_storage());
+    setProp("support_int8_arithmetic", info.support_int8_arithmetic());
+    setProp("support_ycbcr_conversion", info.support_ycbcr_conversion());
+    setProp("support_cooperative_matrix", info.support_cooperative_matrix());
+    setProp("support_cooperative_matrix_16_8_8", info.support_cooperative_matrix_16_8_8());
+    setProp("support_VK_KHR_8bit_storage()", info.support_VK_KHR_8bit_storage());
+    setProp("support_VK_KHR_16bit_storage()", info.support_VK_KHR_16bit_storage());
+    setProp("support_VK_KHR_bind_memory2()", info.support_VK_KHR_bind_memory2());
+    setProp("support_VK_KHR_create_renderpass2()", info.support_VK_KHR_create_renderpass2());
+    setProp("support_VK_KHR_dedicated_allocation()", info.support_VK_KHR_dedicated_allocation());
+    setProp("support_VK_KHR_descriptor_update_template()", info.support_VK_KHR_descriptor_update_template());
+    setProp("support_VK_KHR_external_memory()", info.support_VK_KHR_external_memory());
+    setProp("support_VK_KHR_get_memory_requirements2()", info.support_VK_KHR_get_memory_requirements2());
+    setProp("support_VK_KHR_maintenance1()", info.support_VK_KHR_maintenance1());
+    setProp("support_VK_KHR_maintenance2()", info.support_VK_KHR_maintenance2());
+    setProp("support_VK_KHR_maintenance3()", info.support_VK_KHR_maintenance3());
+    setProp("support_VK_KHR_multiview()", info.support_VK_KHR_multiview());
+    setProp("support_VK_KHR_push_descriptor()", info.support_VK_KHR_push_descriptor());
+    setProp("support_VK_KHR_sampler_ycbcr_conversion()", info.support_VK_KHR_sampler_ycbcr_conversion());
+    setProp("support_VK_KHR_shader_float16_int8()", info.support_VK_KHR_shader_float16_int8());
+    setProp("support_VK_KHR_shader_float_controls()", info.support_VK_KHR_shader_float_controls());
+    setProp("support_VK_KHR_storage_buffer_storage_class()", info.support_VK_KHR_storage_buffer_storage_class());
+    setProp("support_VK_KHR_swapchain()", info.support_VK_KHR_swapchain());
+    setProp("support_VK_EXT_descriptor_indexing()", info.support_VK_EXT_descriptor_indexing());
+    setProp("support_VK_EXT_memory_budget()", info.support_VK_EXT_memory_budget());
+    setProp("support_VK_EXT_queue_family_foreign()", info.support_VK_EXT_queue_family_foreign());
+    setProp("support_VK_NV_cooperative_matrix()", info.support_VK_NV_cooperative_matrix());
+};
 
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit(
@@ -670,6 +803,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
         "fp16:int:opt;"
         "path_is_serialization:int:opt;"
         "flexible_output_prop:data:opt;"
+        "output_format:int:opt;"
         , vsNcnnCreate,
         nullptr,
         plugin
@@ -691,4 +825,6 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
         vsapi->propSetData(out, "path", vsapi->getPluginPath(myself), -1, paReplace);
     };
     registerFunc("Version", "", getVersion, nullptr, plugin);
+
+    registerFunc("DeviceProperties", "device_id:int:opt;", getDeviceProp, nullptr, plugin);
 }

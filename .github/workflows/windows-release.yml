@@ -24,11 +24,6 @@ on:
         required: true
         default: 'latest'
         type: string
-      ncnn_tag:
-        description: 'which tag of ncnn to use'
-        required: true
-        default: 'latest'
-        type: string
 
 jobs:
   build-vsov:
@@ -60,7 +55,13 @@ jobs:
     uses: ./.github/workflows/windows-ncnn.yml
     with:
       tag: ${{ github.event.inputs.tag }}
-      ncnn_tag: ${{ github.event.inputs.ncnn_tag }}
+
+  build-vstrt_rtx:
+    uses: ./.github/workflows/windows-trt_rtx.yml
+    with:
+      tag: ${{ github.event.inputs.tag }}
+    secrets:
+      REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
 
   build-cuda-dependency:
     uses: ./.github/workflows/windows-cuda-dependency.yml
@@ -114,10 +115,11 @@ jobs:
         pushd models
         for tag in $(echo "${{ github.event.inputs.model-tags }}" | tr ',' ' '); do
           echo "Handling tag $tag"
-          curl -s https://api.github.com/repos/AmusementClub/vs-mlrt/releases/tags/"$tag" > release.json
+          curl -s -H 'Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' https://api.github.com/repos/AmusementClub/vs-mlrt/releases/tags/"$tag" > release.json
+          cat release.json
           for url in $(cat release.json | jq '.assets | .[] | .url ' | tr -d '"'); do
             echo "Downloading $url"
-            curl -o dl.7z -LJ -H 'Accept: application/octet-stream' "$url"
+            curl -o dl.7z -LJ -H 'Accept: application/octet-stream' -H 'Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' "$url"
             # later release should overwrite earlier ones
             7za x -y dl.7z
           done
@@ -245,7 +247,7 @@ jobs:
 
   release:
     runs-on: ubuntu-24.04-arm
-    needs: [build-vsov, build-vsort, build-vstrt, build-vsmigx, build-vsncnn, build-cuda-dependency, build-hip-dependency, build-scripts, build-models]
+    needs: [build-vsov, build-vsort, build-vstrt, build-vsmigx, build-vsncnn, build-vstrt_rtx, build-cuda-dependency, build-hip-dependency, build-scripts, build-models]
 
     defaults:
       run:
@@ -293,6 +295,12 @@ jobs:
       with:
         name: VSNCNN-GPU-Windows-x64
         path: vsncnn-release
+
+    - name: Download artifact for vstrt_rtx
+      uses: actions/download-artifact@v4
+      with:
+        name: VSTRT-RTX-Windows-x64
+        path: vstrt-rtx-release
 
     - name: Download artifact for cuda dependencies
       uses: actions/download-artifact@v4
@@ -378,8 +386,8 @@ jobs:
     - name: Extract CUDA libraries
       run: |
         cd cuda-release
-        7za x -bb3 vsmlrt-cuda.7z
-        rm vsmlrt-cuda.7z
+        7za x -bb3 vsmlrt-cuda.7z.001
+        rm vsmlrt-cuda.7z.*
 
     - name: Build CUDA release
       shell: bash
@@ -390,20 +398,19 @@ jobs:
         cp -r vsort-release/* release-cuda/
         cp -r vstrt-release/* release-cuda/
         cp -r vsncnn-release/* release-cuda/
+        cp -r vstrt-rtx-release/* release-cuda/
         cp -r cuda-release/* release-cuda/
         cp scripts-release/*.py release-cuda/
         cd release-cuda
         ls -lR
-        7za a -t7z -bb3 -mx=9 -v2000000000b ../vsmlrt-windows-x64-cuda.7z .
+        7za a -t7z -bb3 -mx=9 -v2147483647b ../vsmlrt-windows-x64-cuda.7z .
 
     - name: Upload CUDA release
       uses: actions/upload-artifact@v4
       if: false
       with:
         name: vsmlrt-cuda-release
-        path: |
-          vsmlrt-windows-x64-cuda.7z.001
-          vsmlrt-windows-x64-cuda.7z.002
+        path: vsmlrt-windows-x64-cuda.7z*
         retention-days: 1
         compression-level: 0
 
@@ -416,9 +423,7 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.event.inputs.tag }}
-        files: |
-          vsmlrt-windows-x64-cuda.${{ github.event.inputs.tag }}.7z.001
-          vsmlrt-windows-x64-cuda.${{ github.event.inputs.tag }}.7z.002
+        files: vsmlrt-windows-x64-cuda.${{ github.event.inputs.tag }}.7z*
         fail_on_unmatched_files: true
         generate_release_notes: false
         prerelease: true
@@ -431,25 +436,27 @@ jobs:
         rm --verbose cublas*.dll cudnn*.dll cufft*.dll cupti*.dll nvblas*.dll
         cd ..
         rm --verbose vsort/onnxruntime_providers_*.dll
-        7za a -t7z -bb3 -mx=9 ../vsmlrt-windows-x64-tensorrt.7z .
+        7za a -t7z -bb3 -mx=9 -v2147483647b ../vsmlrt-windows-x64-tensorrt.7z .
 
     - name: Upload TensorRT release
       uses: actions/upload-artifact@v4
       if: false
       with:
         name: vsmlrt-tensorrt-release
-        path: vsmlrt-windows-x64-tensorrt.7z
+        path: vsmlrt-windows-x64-tensorrt.7z*
         retention-days: 1
         compression-level: 0
 
     - name: Rename release asset for TensorRT release
-      run: mv vsmlrt-windows-x64-tensorrt.7z vsmlrt-windows-x64-tensorrt.${{ github.event.inputs.tag }}.7z
+      run: |
+        mv vsmlrt-windows-x64-tensorrt.7z.001 vsmlrt-windows-x64-tensorrt.${{ github.event.inputs.tag }}.7z.001
+        mv vsmlrt-windows-x64-tensorrt.7z.002 vsmlrt-windows-x64-tensorrt.${{ github.event.inputs.tag }}.7z.002
 
     - name: Release TensorRT
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.event.inputs.tag }}
-        files: vsmlrt-windows-x64-tensorrt.${{ github.event.inputs.tag }}.7z
+        files: vsmlrt-windows-x64-tensorrt.${{ github.event.inputs.tag }}.7z*
         fail_on_unmatched_files: true
         generate_release_notes: false
         prerelease: true

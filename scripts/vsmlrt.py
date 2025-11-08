@@ -1,4 +1,4 @@
-__version__ = "3.22.13"
+__version__ = "3.22.36"
 
 __all__ = [
     "Backend", "BackendV2",
@@ -29,6 +29,7 @@ import sys
 import tempfile
 import time
 import typing
+import warnings
 import zlib
 
 import vapoursynth as vs
@@ -63,6 +64,12 @@ def get_plugins_path() -> str:
 
     if path == b"":
         try:
+            path = core.trt_rtx.Version()["path"]
+        except AttributeError:
+            pass
+
+    if path == b"":
+        try:
             path = core.migx.Version()["path"]
         except AttributeError:
             pass
@@ -76,6 +83,7 @@ def get_plugins_path() -> str:
 plugins_path: str = get_plugins_path()
 trtexec_path: str = os.path.join(plugins_path, "vsmlrt-cuda", "trtexec")
 migraphx_driver_path: str = os.path.join(plugins_path, "vsmlrt-hip", "migraphx-driver")
+tensorrt_rtx_path: str = os.path.join(plugins_path, "vsmlrt-cuda", "tensorrt_rtx")
 models_path: str = os.path.join(plugins_path, "models")
 
 
@@ -88,6 +96,7 @@ class Backend:
         verbosity: int = 2
         fp16: bool = False
         fp16_blacklist_ops: typing.Optional[typing.Sequence[str]] = None
+        output_format: int = 0 # 0: fp32, 1: fp16
 
         # internal backend attributes
         supports_onnx_serialization: bool = True
@@ -221,6 +230,7 @@ class Backend:
         fp16: bool = False
         device_id: int = 0
         num_streams: int = 1
+        output_format: int = 0 # 0: fp32, 1: fp16
 
         # internal backend attributes
         supports_onnx_serialization: bool = True
@@ -234,6 +244,7 @@ class Backend:
         verbosity: int = 2
         fp16: bool = False
         fp16_blacklist_ops: typing.Optional[typing.Sequence[str]] = None
+        output_format: int = 0 # 0: fp32, 1: fp16
 
         # internal backend attributes
         supports_onnx_serialization: bool = True
@@ -276,9 +287,50 @@ class Backend:
         fp16: bool = False
         fp16_blacklist_ops: typing.Optional[typing.Sequence[str]] = None
         ml_program: int = 0
+        output_format: int = 0 # 0: fp32, 1: fp16
 
         # internal backend attributes
         supports_onnx_serialization: bool = True
+
+    @dataclass(frozen=False)
+    class TRT_RTX:
+        """ backend for nvidia rtx gpus
+
+        basic performance tuning:
+        set fp16 = True
+        increase num_streams
+        increase workspace
+        set use_cuda_graph = True
+        """
+
+        fp16: bool = False
+        device_id: int = 0
+        workspace: typing.Optional[int] = None
+        verbose: bool = False
+        use_cuda_graph: bool = False
+        num_streams: int = 1
+
+        static_shape: bool = True
+        min_shapes: typing.Tuple[int, int] = (0, 0)
+        opt_shapes: typing.Optional[typing.Tuple[int, int]] = None
+        max_shapes: typing.Optional[typing.Tuple[int, int]] = None
+
+        use_cudnn: bool = False
+        use_edge_mask_convolutions: bool = True
+        # use_jit_convolutions: bool = True
+        # output_format: int = 0 # 0: fp32, 1: fp16
+        builder_optimization_level: int = 3
+        max_aux_streams: typing.Optional[int] = None
+        short_path: typing.Optional[bool] = None # True on Windows by default, False otherwise
+        custom_env: typing.Dict[str, str] = field(default_factory=lambda: {})
+        custom_args: typing.List[str] = field(default_factory=lambda: [])
+        engine_folder: typing.Optional[str] = None
+        max_tactics: typing.Optional[int] = None
+        tiling_optimization_level: int = 0
+        l2_limit_for_tiling: int = -1
+
+        # internal backend attributes
+        supports_onnx_serialization: bool = False
 
 
 backendT = typing.Union[
@@ -292,6 +344,7 @@ backendT = typing.Union[
     Backend.MIGX,
     Backend.OV_NPU,
     Backend.ORT_COREML,
+    Backend.TRT_RTX,
 ]
 
 
@@ -523,7 +576,7 @@ def DPIR(
         if strength.num_frames != clip.num_frames:
             raise ValueError(f'{func_name}: "strength" must be of the same length as "clip"')
 
-        strength = core.std.Expr(strength, "x 255 /", format=gray_format)
+        strength = _expr(strength, "x 255 /", format=gray_format)
     else:
         try:
             strength = float(strength)
@@ -640,6 +693,11 @@ def RealESRGAN(
         multiple=multiple,
         overlap_w=overlap_w, overlap_h=overlap_h
     )
+
+    if tile_w % multiple != 0 or tile_h % multiple != 0:
+        raise ValueError(
+            f'{func_name}: tile size must be divisible by {multiple} ({tile_w}, {tile_h})'
+        )
 
     backend = init_backend(
         backend=backend,
@@ -819,7 +877,7 @@ def CUGAN(
 
         if backend.supports_onnx_serialization:
             if conformance and version == 2:
-                clip = core.std.Expr(clip, "x 0.7 * 0.15 +")
+                clip = _expr(clip, "x 0.7 * 0.15 +")
 
             clip = inference_with_fallback(
                 clips=[clip], network_path=model.SerializeToString(),
@@ -828,7 +886,7 @@ def CUGAN(
             )
 
             if conformance and version == 2:
-                clip = core.std.Expr(clip, "x 0.15 - 0.7 /")
+                clip = _expr(clip, "x 0.15 - 0.7 /")
 
             return clip
 
@@ -837,7 +895,7 @@ def CUGAN(
 
     # https://github.com/bilibili/ailab/blob/e102bef22384c629f82552dbec3d6b5bab125639/Real-CUGAN/upcunet_v3.py#L1275-L1276
     if conformance and version == 2:
-        clip = core.std.Expr(clip, "x 0.7 * 0.15 +")
+        clip = _expr(clip, "x 0.7 * 0.15 +")
 
     clip = inference_with_fallback(
         clips=[clip], network_path=network_path,
@@ -847,7 +905,7 @@ def CUGAN(
 
     # https://github.com/bilibili/ailab/blob/e102bef22384c629f82552dbec3d6b5bab125639/Real-CUGAN/upcunet_v3.py#L269
     if conformance and version == 2:
-        clip = core.std.Expr(clip, "x 0.15 - 0.7 /")
+        clip = _expr(clip, "x 0.15 - 0.7 /")
 
     return clip
 
@@ -1264,14 +1322,6 @@ def RIFE(
         else:
             return res
     else:
-        if not hasattr(core, 'akarin') or \
-            not hasattr(core.akarin, 'PropExpr') or \
-            not hasattr(core.akarin, 'PickFrames'):
-            raise RuntimeError(
-                'fractional multi requires plugin akarin '
-                '(https://github.com/AkarinVS/vapoursynth-plugin/releases)'
-                ', version v0.96g or later.')
-
         if clip.fps_num == 0 or clip.fps_den == 0:
             src_fps = Fraction(1)
         else:
@@ -1389,6 +1439,7 @@ class SAFAModel(enum.IntEnum):
     v0_2 = 2
     v0_3 = 3
     v0_4 = 4
+    v0_5 = 5
 
 
 @enum.unique
@@ -1443,6 +1494,11 @@ def SAFA(
         multiple=multiple,
         overlap_w=overlap_w, overlap_h=overlap_h
     )
+
+    if tile_w % multiple != 0 or tile_h % multiple != 0:
+        raise ValueError(
+            f'{func_name}: tile size must be divisible by {multiple} ({tile_w}, {tile_h})'
+        )
 
     backend = init_backend(
         backend=backend,
@@ -1717,6 +1773,11 @@ class ArtCNNModel(enum.IntEnum):
     ArtCNN_R8F64_Chroma = 9
     ArtCNN_C4F16 = 10
     ArtCNN_C4F16_DS = 11
+    ArtCNN_R16F96_Chroma = 12
+    ArtCNN_C4F16_DN = 13
+    ArtCNN_C4F32_DN = 14
+    ArtCNN_R8F64_JPEG420 = 15
+    ArtCNN_R8F64_JPEG444 = 16
 
 
 def ArtCNN(
@@ -1740,7 +1801,12 @@ def ArtCNN(
     if not isinstance(model, int) or model not in ArtCNNModel.__members__.values():
         raise ValueError(f'{func_name}: invalid "model"')
 
-    if model in (4, 5, 9):
+    if model in (
+        ArtCNNModel.ArtCNN_C4F32_Chroma,
+        ArtCNNModel.ArtCNN_C16F64_Chroma,
+        ArtCNNModel.ArtCNN_R8F64_Chroma,
+        ArtCNNModel.ArtCNN_R16F96_Chroma,
+    ):
         if clip.format.color_family != vs.YUV:
             raise ValueError(f'{func_name}: "clip" must be of YUV color family')
         if clip.format.subsampling_h != 0 or clip.format.subsampling_w != 0:
@@ -1748,6 +1814,12 @@ def ArtCNN(
                 f'{func_name}: "clip" must be without subsampling! '
                 'Bilinear upsampling is recommended.'
             )
+    elif model in (
+        ArtCNNModel.ArtCNN_R8F64_JPEG420,
+        ArtCNNModel.ArtCNN_R8F64_JPEG444,
+    ):
+        if clip.format.color_family != vs.RGB:
+            raise ValueError(f'{func_name}: "clip" must be of RGB color family')
     elif clip.format.color_family != vs.GRAY:
         raise ValueError(f'{func_name}: "clip" must be of GRAY color family')
 
@@ -1785,11 +1857,13 @@ def ArtCNN(
         f"{model_name}.onnx"
     )
 
-    if model in (4, 5, 9):
-        if clip.format.bits_per_sample == 16:
-            clip = core.akarin.Expr(clip, ["", "x 0.5 +"])
-        else:
-            clip = core.std.Expr(clip, ["", "x 0.5 +"])
+    if model in (
+        ArtCNNModel.ArtCNN_C4F32_Chroma,
+        ArtCNNModel.ArtCNN_C16F64_Chroma,
+        ArtCNNModel.ArtCNN_R8F64_Chroma,
+        ArtCNNModel.ArtCNN_R16F96_Chroma
+    ):
+        clip = _expr(clip, ["", "x 0.5 +"])
 
         clip_u, clip_v = flexible_inference_with_fallback(
             clips=[clip], network_path=network_path,
@@ -1799,10 +1873,7 @@ def ArtCNN(
 
         clip = core.std.ShufflePlanes([clip, clip_u, clip_v], [0, 0, 0], vs.YUV)
 
-        if clip.format.bits_per_sample == 16:
-            clip = core.akarin.Expr(clip, ["", "x 0.5 -"])
-        else:
-            clip = core.std.Expr(clip, ["", "x 0.5 -"])
+        clip = _expr(clip, ["", "x 0.5 -"])
     else:
         clip = inference_with_fallback(
             clips=[clip], network_path=network_path,
@@ -1820,7 +1891,6 @@ def get_engine_path(
     max_shapes: typing.Tuple[int, int],
     workspace: typing.Optional[int],
     fp16: bool,
-    device_id: int,
     use_cublas: bool,
     static_shape: bool,
     tf32: bool,
@@ -1831,19 +1901,14 @@ def get_engine_path(
     max_aux_streams: typing.Optional[int],
     short_path: typing.Optional[bool],
     bf16: bool,
-    engine_folder: typing.Optional[str]
+    engine_folder: typing.Optional[str],
+    is_rtx: bool = False,
+    trt_version: typing.Tuple[int, int, int] = (0, 0, 0),
+    device_name: str = "",
 ) -> str:
 
     with open(network_path, "rb") as file:
         checksum = zlib.adler32(file.read())
-
-    trt_version = core.trt.Version()["tensorrt_version"].decode()
-
-    try:
-        device_name = core.trt.DeviceProperties(device_id)["name"].decode()
-        device_name = device_name.replace(' ', '-')
-    except AttributeError:
-        device_name = f"device{device_id}"
 
     if static_shape:
         shape_str = f"{opt_shapes[0]}x{opt_shapes[1]}"
@@ -1862,12 +1927,13 @@ def get_engine_path(
         (f"_workspace{workspace}" if workspace is not None else "") +
         f"_opt{builder_optimization_level}" +
         (f"_max-aux-streams{max_aux_streams}" if max_aux_streams is not None else "") +
-        f"_trt-{trt_version}" +
+        "_trt-" + '.'.join(map(str, trt_version)) +
         ("_cublas" if use_cublas else "") +
         ("_cudnn" if use_cudnn else "") +
         "_I-" + ("fp32" if input_format == 0 else "fp16") +
         "_O-" + ("fp32" if output_format == 0 else "fp16") +
         f"_{device_name}" +
+        ("_rtx" if is_rtx else "") +
         f"_{checksum:x}"
     )
 
@@ -1909,7 +1975,7 @@ def trtexec(
     static_shape: bool = True,
     tf32: bool = False,
     log: bool = False,
-    use_cudnn: bool = True,
+    use_cudnn: bool = False,
     use_edge_mask_convolutions: bool = True,
     use_jit_convolutions: bool = True,
     heuristic: bool = False,
@@ -1945,6 +2011,12 @@ def trtexec(
         tf32 = False
         bf16 = False
 
+    try:
+        device_name = core.trt.DeviceProperties(device_id)["name"].decode()
+        device_name = device_name.replace(' ', '-')
+    except AttributeError:
+        device_name = f"device{device_id}"
+
     engine_path = get_engine_path(
         network_path=network_path,
         min_shapes=min_shapes,
@@ -1952,7 +2024,6 @@ def trtexec(
         max_shapes=max_shapes,
         workspace=workspace,
         fp16=fp16,
-        device_id=device_id,
         use_cublas=use_cublas,
         static_shape=static_shape,
         tf32=tf32,
@@ -1964,9 +2035,11 @@ def trtexec(
         short_path=short_path,
         bf16=bf16,
         engine_folder=engine_folder,
+        trt_version=trt_version,
+        device_name=device_name,
     )
 
-    if os.access(engine_path, mode=os.R_OK):
+    if os.access(engine_path, mode=os.R_OK) and os.path.getsize(engine_path) >= 1024:
         return engine_path
 
     # do not consider alternative path when the engine_folder is given
@@ -1976,7 +2049,7 @@ def trtexec(
             os.path.splitdrive(engine_path)[1][1:]
         )
 
-        if os.access(alter_engine_path, mode=os.R_OK):
+        if os.access(alter_engine_path, mode=os.R_OK) and os.path.getsize(alter_engine_path) >= 1024:
             return alter_engine_path
 
     try:
@@ -2014,9 +2087,9 @@ def trtexec(
         args.append(f"--shapes={input_name}:1x{channels}x{opt_shapes[1]}x{opt_shapes[0]}")
     else:
         args.extend([
-            f"--minShapes=input:1x{channels}x{min_shapes[1]}x{min_shapes[0]}",
-            f"--optShapes=input:1x{channels}x{opt_shapes[1]}x{opt_shapes[0]}",
-            f"--maxShapes=input:1x{channels}x{max_shapes[1]}x{max_shapes[0]}"
+            f"--minShapes={input_name}:1x{channels}x{min_shapes[1]}x{min_shapes[0]}",
+            f"--optShapes={input_name}:1x{channels}x{opt_shapes[1]}x{opt_shapes[0]}",
+            f"--maxShapes={input_name}:1x{channels}x{max_shapes[1]}x{max_shapes[0]}"
         ])
 
     if fp16:
@@ -2224,7 +2297,7 @@ def migraphx_driver(
         short_path=short_path
     )
 
-    if os.access(mxr_path, mode=os.R_OK):
+    if os.access(mxr_path, mode=os.R_OK) and os.path.getsize(mxr_path) >= 1024:
         return mxr_path
 
     alter_mxr_path = os.path.join(
@@ -2232,7 +2305,7 @@ def migraphx_driver(
         os.path.splitdrive(mxr_path)[1][1:]
     )
 
-    if os.access(alter_mxr_path, mode=os.R_OK):
+    if os.access(alter_mxr_path, mode=os.R_OK) and os.path.getsize(mxr_path) >= 1024:
         return alter_mxr_path
 
     try:
@@ -2278,6 +2351,192 @@ def migraphx_driver(
     subprocess.run(args, env=custom_env, check=True, stdout=sys.stderr)
 
     return mxr_path
+
+
+def tensorrt_rtx(
+    network_path: str,
+    channels: int,
+    fp16: bool,
+    device_id: int,
+    opt_shapes: typing.Tuple[int, int],
+    max_shapes: typing.Tuple[int, int],
+    workspace: typing.Optional[int] = None,
+    verbose: bool = False,
+    use_cuda_graph: bool = False,
+    static_shape: bool = True,
+    min_shapes: typing.Tuple[int, int] = (0, 0),
+    use_cudnn: bool = False,
+    use_edge_mask_convolutions: bool = True,
+    input_name: str = "input",
+    builder_optimization_level: int = 3,
+    max_aux_streams: typing.Optional[int] = None,
+    short_path: typing.Optional[bool] = None,
+    custom_env: typing.Dict[str, str] = {},
+    custom_args: typing.List[str] = [],
+    engine_folder: typing.Optional[str] = None,
+    max_tactics: typing.Optional[int] = None,
+    tiling_optimization_level: int = 0,
+    l2_limit_for_tiling: int = -1,
+    fp16_io: bool = False,
+) -> str:
+
+    # tensort runtime version
+    trt_version = parse_trt_version(int(core.trt_rtx.Version()["tensorrt_version"]))
+
+    if fp16:
+        with open(network_path, "rb") as file:
+            checksum = zlib.adler32(file.read())
+
+        dirname, basename = os.path.split(network_path)
+
+        if engine_folder is not None:
+            os.makedirs(engine_folder, exist_ok=True)
+            dirname = engine_folder
+
+        fp16_network_path = f"{os.path.join(dirname, basename)}_{checksum}_fp16{'_io' if fp16_io else ''}.onnx"
+        if not (os.access(fp16_network_path, mode=os.R_OK) and os.path.getsize(fp16_network_path) >= 1024):
+            import onnx
+            model = onnx.load(network_path)
+            try:
+                from onnxconverter_common.float16 import convert_float_to_float16
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    model = convert_float_to_float16(model, keep_io_types=not fp16_io)
+            except Exception:
+                import logging
+                from modelopt.onnx.autocast import convert_to_f16, configure_logging
+                configure_logging(logging.ERROR)
+                model = convert_to_f16(model, keep_io_types=not fp16_io)
+            onnx.save(model, fp16_network_path)
+        network_path = fp16_network_path
+    elif fp16_io:
+        raise ValueError('tensorrt_rtx: "fp16" must be True.')
+
+    try:
+        device_name = core.trt_rtx.DeviceProperties(device_id)["name"].decode()
+        device_name = device_name.replace(' ', '-')
+    except AttributeError:
+        device_name = f"device{device_id}"
+
+    engine_path = get_engine_path(
+        network_path=network_path,
+        min_shapes=min_shapes,
+        opt_shapes=opt_shapes,
+        max_shapes=max_shapes,
+        workspace=workspace,
+        fp16=fp16,
+        use_cublas=False,
+        static_shape=static_shape,
+        tf32=False,
+        use_cudnn=use_cudnn,
+        input_format=int(fp16_io),
+        output_format=int(fp16_io),
+        builder_optimization_level=builder_optimization_level,
+        max_aux_streams=max_aux_streams,
+        short_path=short_path,
+        bf16=False,
+        engine_folder=engine_folder,
+        is_rtx=True,
+        trt_version=trt_version,
+        device_name=device_name,
+    )
+
+    if os.access(engine_path, mode=os.R_OK) and os.path.getsize(engine_path) >= 1024:
+        return engine_path
+
+    # do not consider alternative path when the engine_folder is given
+    if engine_folder is None:
+        alter_engine_path = os.path.join(
+            tempfile.gettempdir(),
+            os.path.splitdrive(engine_path)[1][1:]
+        )
+
+        if os.access(alter_engine_path, mode=os.R_OK) and os.path.getsize(alter_engine_path) >= 1024:
+            return alter_engine_path
+
+    try:
+        # test writability
+        with open(engine_path, "w") as f:
+            pass
+        os.remove(engine_path)
+    except PermissionError:
+        if engine_folder is None:
+            print(f"{engine_path} is not writable", file=sys.stderr)
+            engine_path = alter_engine_path
+            dirname = os.path.dirname(engine_path)
+            if not os.path.exists(dirname):
+                os.makedirs(dirname)
+            print(f"change engine path to {engine_path}", file=sys.stderr)
+        else:
+            # do not consider alternative path when the engine_folder is given
+            raise PermissionError(f"{engine_path} is not writable")
+
+    args = [
+        tensorrt_rtx_path,
+        f"--onnx={network_path}",
+        f"--timingCacheFile={engine_path}.cache",
+        f"--device={device_id}",
+        f"--saveEngine={engine_path}",
+        "--useGpu",
+    ]
+
+    if workspace is not None:
+        args.append(f"--memPoolSize=workspace:{workspace}")
+
+    if static_shape:
+        args.append(f"--shapes={input_name}:1x{channels}x{opt_shapes[1]}x{opt_shapes[0]}")
+    else:
+        args.extend([
+            f"--minShapes={input_name}:1x{channels}x{min_shapes[1]}x{min_shapes[0]}",
+            f"--optShapes={input_name}:1x{channels}x{opt_shapes[1]}x{opt_shapes[0]}",
+            f"--maxShapes={input_name}:1x{channels}x{max_shapes[1]}x{max_shapes[0]}",
+            "--specializeStrategyDS=eager"
+        ])
+
+    if verbose:
+        args.append("--verbose")
+
+    tactic_sources = []
+
+    if use_cudnn:
+        tactic_sources.append("+CUDNN")
+    else:
+        tactic_sources.append("-CUDNN")
+
+    if use_edge_mask_convolutions:
+        tactic_sources.append("+EDGE_MASK_CONVOLUTIONS")
+    else:
+        tactic_sources.append("-EDGE_MASK_CONVOLUTIONS")
+
+    args.append(f"--tacticSources={','.join(tactic_sources)}")
+
+    if use_cuda_graph:
+        args.extend((
+            "--useCudaGraph",
+            "--noDataTransfers"
+        ))
+    else:
+        args.append("--skipInference")
+
+    args.append(f"--builderOptimizationLevel={builder_optimization_level}")
+
+    if max_aux_streams is not None:
+        args.append(f"--maxAuxStreams={max_aux_streams}")
+
+    if max_tactics is not None:
+        args.append(f"--maxTactics={max_tactics}")
+
+    if tiling_optimization_level != 0:
+        args.append(f"--tilingOptimizationLevel={tiling_optimization_level}")
+        args.append(f"--l2LimitForTiling={l2_limit_for_tiling}")
+
+    args.extend(custom_args)
+
+    env = {"CUDA_MODULE_LOADING": "LAZY"}
+    env.update(**custom_env)
+    subprocess.run(args, env=env, check=True, stdout=sys.stderr)
+
+    return engine_path
 
 
 def calc_size(width: int, tiles: int, overlap: int, multiple: int = 1) -> int:
@@ -2336,12 +2595,14 @@ def init_backend(
         backend = Backend.ORT_DML()
     elif backend is Backend.MIGX: # type: ignore
         backend = Backend.MIGX()
-    elif backend is Backend.OV_NPU:
+    elif backend is Backend.OV_NPU: # type: ignore
         backend = Backend.OV_NPU()
+    elif backend is Backend.TRT_RTX: # type: ignore
+        backend = Backend.TRT_RTX()
 
     backend = copy.deepcopy(backend)
 
-    if isinstance(backend, Backend.TRT):
+    if isinstance(backend, (Backend.TRT, Backend.TRT_RTX)):
         if backend.opt_shapes is None:
             backend.opt_shapes = trt_opt_shapes
 
@@ -2382,6 +2643,8 @@ def _inference(
             raise ValueError('"path_is_serialization" must be False for trt backend')
         elif isinstance(backend, Backend.MIGX):
             raise ValueError('"path_is_serialization" must be False for migx backend')
+        elif isinstance(backend, Backend.TRT_RTX):
+            raise ValueError('"path_is_serialization" must be False for trt_rtx backend')
 
     if not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError('"batch_size" must be a positve integer')
@@ -2462,6 +2725,20 @@ def _inference(
     if flexible_output_prop is not None:
         kwargs["flexible_output_prop"] = flexible_output_prop
 
+    if isinstance(backend, (Backend.ORT_CPU, Backend.ORT_DML, Backend.ORT_COREML, Backend.ORT_CUDA)):
+        version_list = core.ort.Version().get("onnxruntime_version", b"0.0.0").split(b'.')
+        if len(version_list) != 3:
+            version = (0, 0, 0)
+        else:
+            version = tuple(map(int, version_list))
+
+        if version >= (1, 18, 0):
+            kwargs["output_format"] = backend.output_format
+
+    elif isinstance(backend, Backend.NCNN_VK):
+        if "output_format" in core.ncnn.Model.signature:
+            kwargs["output_format"] = backend.output_format
+
     if isinstance(backend, Backend.ORT_CPU):
         ret = core.ort.Model(
             clips, network_path,
@@ -2506,7 +2783,6 @@ def _inference(
 
         if version >= (1, 18, 0):
             kwargs["prefer_nhwc"] = backend.prefer_nhwc
-            kwargs["output_format"] = backend.output_format
             kwargs["tf32"] = backend.tf32
 
         ret = core.ort.Model(
@@ -2676,6 +2952,52 @@ def _inference(
             device="NPU", builtin=False,
             fp16=False, # use ov's internal quantization
             path_is_serialization=path_is_serialization,
+            **kwargs
+        )
+    elif isinstance(backend, Backend.TRT_RTX):
+        network_path = typing.cast(str, network_path)
+
+        channels = sum(clip.format.num_planes for clip in clips)
+
+        opt_shapes = backend.opt_shapes if backend.opt_shapes is not None else tilesize
+        max_shapes = backend.max_shapes if backend.max_shapes is not None else tilesize
+
+        engine_path = tensorrt_rtx(
+            network_path,
+            channels=channels,
+            fp16=backend.fp16,
+            device_id=backend.device_id,
+            opt_shapes=backend.opt_shapes,
+            max_shapes=backend.max_shapes,
+            workspace=backend.workspace,
+            verbose=backend.verbose,
+            use_cuda_graph=backend.use_cuda_graph,
+            static_shape=backend.static_shape,
+            min_shapes=backend.min_shapes,
+            use_cudnn=backend.use_cudnn,
+            use_edge_mask_convolutions=backend.use_edge_mask_convolutions,
+            input_name=input_name,
+            builder_optimization_level=backend.builder_optimization_level,
+            max_aux_streams=backend.max_aux_streams,
+            short_path=backend.short_path,
+            custom_env=backend.custom_env,
+            custom_args=backend.custom_args,
+            engine_folder=backend.engine_folder,
+            max_tactics=backend.max_tactics,
+            tiling_optimization_level=backend.tiling_optimization_level,
+            l2_limit_for_tiling=backend.l2_limit_for_tiling,
+
+            # the following option is experimental
+            # input_format=clips[0].format.bits_per_sample == 16,
+            # output_format=backend.output_format,
+            fp16_io=clips[0].format.bits_per_sample == 16
+        )
+        ret = core.trt_rtx.Model(
+            clips, engine_path,
+            device_id=backend.device_id,
+            use_cuda_graph=backend.use_cuda_graph,
+            num_streams=backend.num_streams,
+            verbosity=4 if backend.verbose else 2,
             **kwargs
         )
     else:
@@ -3050,6 +3372,30 @@ class BackendV2:
             **kwargs
         )
 
+    @staticmethod
+    def TRT_RTX(*,
+        num_streams: int = 1,
+        fp16: bool = False,
+        workspace: typing.Optional[int] = None,
+        use_cuda_graph: bool = False,
+        static_shape: bool = True,
+        min_shapes: typing.Tuple[int, int] = (0, 0),
+        opt_shapes: typing.Optional[typing.Tuple[int, int]] = None,
+        max_shapes: typing.Optional[typing.Tuple[int, int]] = None,
+        device_id: int = 0,
+        **kwargs
+    ) -> Backend.TRT_RTX:
+
+        return Backend.TRT_RTX(
+            num_streams=num_streams,
+            fp16=fp16,
+            workspace=workspace, use_cuda_graph=use_cuda_graph,
+            static_shape=static_shape,
+            min_shapes=min_shapes, opt_shapes=opt_shapes, max_shapes=max_shapes,
+            device_id=device_id,
+            **kwargs
+        )
+
 
 def fmtc_resample(clip: vs.VideoNode, **kwargs) -> vs.VideoNode:
     clip_org = clip
@@ -3072,3 +3418,14 @@ def parse_trt_version(version: int) -> typing.Tuple[int, int, int]:
         return version // 1000, (version // 100) % 10, version % 100
     else:
         return version // 10000, (version // 100) % 100, version % 100
+
+
+def _expr(
+    clip: vs.VideoNode,
+    expr: typing.Union[str, typing.Sequence[str]],
+    format: typing.Optional[int] = None
+) -> vs.VideoNode:
+    try:
+        return core.akarin.Expr(clip, expr, format)
+    except vs.Error:
+        return core.std.Expr(clip, expr, format)
